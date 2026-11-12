@@ -1,0 +1,131 @@
+
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_USER = 'pranit-butale'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        DEPLOY_HOST = '3.26.207.94'
+    }
+
+    stages {
+
+        stage('step-1-pull') {
+            steps {
+                echo 'Pulling Source Code from GitHub'
+
+                git branch: 'master',
+                    url: 'https://github.com/pranit-butale/DevOps-fullstack-assignment.git'
+            }
+        }
+
+        stage('step-2-build') {
+            steps {
+                echo 'Building Backend and Frontend Images'
+
+                dir('Full Stack Application') {
+                    sh '''
+                        docker build -t $DOCKERHUB_USER/devops-backend:$IMAGE_TAG ./backend
+
+                        docker build -t $DOCKERHUB_USER/devops-frontend:$IMAGE_TAG ./frontend
+                    '''
+                }
+            }
+        }
+
+        stage('step-3-push') {
+            steps {
+                echo 'Pushing Images to Docker Hub'
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DH_USER',
+                        passwordVariable: 'DH_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DH_TOKEN" | docker login \
+                            -u "$DH_USER" --password-stdin
+
+                        docker push $DH_USER/devops-backend:$IMAGE_TAG
+                        docker push $DH_USER/devops-frontend:$IMAGE_TAG
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('step-4-deploy') {
+            steps {
+                echo 'Deploying Application on Second EC2'
+
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'deployment-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DH_USER',
+                        passwordVariable: 'DH_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        printf '%s' "$DH_TOKEN" | ssh \
+                            -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker login -u '$DH_USER' --password-stdin"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker pull $DH_USER/devops-backend:$IMAGE_TAG && \
+                             docker pull $DH_USER/devops-frontend:$IMAGE_TAG"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker rm -f django_backend react_frontend || true"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker run -d --name django_backend \
+                             -p 8000:8000 \
+                             $DH_USER/devops-backend:$IMAGE_TAG"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker run -d --name react_frontend \
+                             -p 80:8080 \
+                             $DH_USER/devops-frontend:$IMAGE_TAG"
+
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=accept-new \
+                            "$SSH_USER@$DEPLOY_HOST" \
+                            "docker logout"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'CI/CD Pipeline Completed Successfully!'
+        }
+
+        failure {
+            echo 'CI/CD Pipeline Failed. Check Console Output.'
+        }
+
+        always {
+            echo 'Pipeline Execution Finished.'
+        }
+    }
+}
